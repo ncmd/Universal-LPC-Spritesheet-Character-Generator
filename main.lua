@@ -19,7 +19,7 @@ local character = {} -- Character parts
 local characterLayers = {} -- Loaded character images by layer
 local currentFrame = 1
 local animationTimer = 0
-local currentAnimation = "idle"
+local currentAnimation = "walk"
 local currentDirection = "south" -- south, west, east, north
 local availableAnimations = {"idle", "walk", "run", "jump", "slash", "cast", "thrust",  "hurt", "backslash", "climb", "combat_idle", "emote", "sit", "halfslash"}
 local directions = {"south", "west", "east", "north"}
@@ -215,25 +215,35 @@ function generateRandomCharacter()
 
     -- Base body
     local bodySheet = findSheetByType(sheets, "body")
+    print("BODY SHEET:",bodySheet.sheet_id)
     if bodySheet then
-        character.body = {
-            sheet_id = bodySheet.sheet_id,
-            name = bodySheet.name,
-            type = bodySheet.type_name,
-            path = getLayerPath(bodySheet.sheet_id, "body")
-        }
+        local variant = findVariantByType(bodySheet.sheet_id, "body")
+        if variant ~= nil then
+            if bodySheet then
+                character["body"] = {
+                    sheet_id = bodySheet.sheet_id,
+                    name = bodySheet.name,
+                    type = bodySheet.type_name,
+                    path = getLayerPath(bodySheet.sheet_id, "body")..currentAnimation.."/"..variant.variant_name..".png"
+                }
+            end
+        end
     end
 
     -- Base head
     local headSheet = findSheetByType(sheets, "head")
     if headSheet then
-        print("HEADDD:"..headSheet.name)
-        character.head = {
-            sheet_id = headSheet.sheet_id,
-            name = headSheet.name,
-            type = headSheet.type_name,
-            path = getLayerPath(headSheet.sheet_id, "head")
-        }
+        local variant = findVariantByType(headSheet.sheet_id, "head")
+        if variant ~= nil then
+            if headSheet then
+                character["head"] = {
+                    sheet_id = headSheet.sheet_id,
+                    name = headSheet.name,
+                    type = headSheet.type_name,
+                    path = getLayerPath(headSheet.sheet_id, "head")..currentAnimation.."/"..variant.variant_name..".png"
+                }
+            end
+        end
     end
 
     -- Add other parts (head, hair, clothes, etc.)
@@ -246,21 +256,38 @@ function generateRandomCharacter()
         ORDER BY RANDOM()
     ]])
 
-    local addedTypes = {head = true, body = true, face = true, arms = true} -- Track added types to avoid duplicates
+    local addedTypes = {head = true, body = true, face = true}
 
     local row = cursor:fetch({}, "a")
     while row do
         -- Only add if we don't have this type yet
         if not addedTypes[row.type_name] then
-            -- 50% chance to add this part (for more variety)
-            -- if love.math.random() > 0.5 then
-                character[row.type_name] = {
-                    sheet_id = row.sheet_id,
-                    name = row.name,
-                    type = row.type_name,
-                    path = getLayerPath(row.sheet_id)
-                }
+
+            if love.math.random() > 0.5 then
+                local variant = findVariantByType(row.sheet_id, row.type_name)
+                if variant ~= nil then
+                    if row then
+                        character["head"] = {
+                            sheet_id = row.sheet_id,
+                            name = row.name,
+                            type = row.type_name,
+                            path = getLayerPath(row.sheet_id, row.type_name)..currentAnimation.."/"..variant.variant_name..".png"
+                        }
+                    end
+                end
                 addedTypes[row.type_name] = true
+            end
+
+            -- -- 50% chance to add this part (for more variety)
+            -- -- if love.math.random() > 0.5 then
+            --     character[row.type_name] = {
+            --         sheet_id = row.sheet_id,
+            --         name = row.name,
+            --         type = row.type_name,
+            --         -- path = getLayerPath(row.sheet_id)
+            --         path = getLayerPath(row.sheet_id, row.type_name).."/".."walk".."/"..variant..".png"
+            --     }
+                -- addedTypes[row.type_name] = true
             -- end
         end
 
@@ -315,18 +342,24 @@ end
 --               amber.png
 function ensureBasicParts(sheets)
     -- local essentialTypes = {"eyes","body", "head", "hair", "arms","legs", "feet"}
-    local essentialTypes = {"eyes","body", "head", "hair", "arms","legs", "feet"}
+    local essentialTypes = {"eyes", "body", "head", "hair", "arms", "legs", "feet"}
 
     for _, essentialType in ipairs(essentialTypes) do
         if not character[essentialType] then
             local sheet = findSheetByType(sheets, essentialType)
-            if sheet then
-                character[essentialType] = {
-                    sheet_id = sheet.sheet_id,
-                    name = sheet.name,
-                    type = sheet.type_name,
-                    path = getLayerPath(sheet.sheet_id, essentialType)
-                }
+            if sheet ~= nil then
+
+                local variant = findVariantByType(sheet.sheet_id, essentialType)
+                if variant ~= nil then
+                    if sheet then
+                        character[essentialType] = {
+                            sheet_id = sheet.sheet_id,
+                            name = sheet.name,
+                            type = sheet.type_name,
+                            path = getLayerPath(sheet.sheet_id, essentialType)..currentAnimation.."/"..variant.variant_name..".png"
+                        }
+                    end
+                end
             end
         end
     end
@@ -338,27 +371,55 @@ function findRequiredSheet(sheets,type)
     print("FINDING REQAUIRED SHEET")
 
     if type == "body" then
+        -- cursor = conn:execute(string.format([[
+        --     SELECT l.sheet_id, lp.path_value
+        --     FROM layers l
+        --     JOIN layer_paths lp ON l.layer_id = lp.layer_id
+        --     WHERE lp.path_value like '%%body/bodies/%%'
+        --     ORDER BY RANDOM()
+        --     LIMIT 1
+        -- ]]))
         cursor = conn:execute(string.format([[
-            SELECT l.sheet_id, lp.path_value
+            SELECT l.sheet_id, lp.path_value, s.type_name
             FROM layers l
             JOIN layer_paths lp ON l.layer_id = lp.layer_id
-            WHERE lp.path_value like '%%body/bodies/male/%%'
-        ]]))
+            JOIN sheets s ON l.sheet_id = s.sheet_id
+            WHERE lp.path_value like '%%body/bodies/%%'
+            AND s.type_name = '%s'
+            ORDER BY RANDOM()
+            LIMIT 1
+        ]], type))
         print("BODY")
     elseif type == "head" then
+        -- cursor = conn:execute(string.format([[
+        --     SELECT l.sheet_id, lp.path_value
+        --     FROM layers l
+        --     JOIN layer_paths lp ON l.layer_id = lp.layer_id
+        --     WHERE lp.path_value like '%%head/heads/%%'
+        --     ORDER BY RANDOM()
+        --     LIMIT 1
+        -- ]]))
         cursor = conn:execute(string.format([[
-            SELECT l.sheet_id, lp.path_value
+            SELECT l.sheet_id, lp.path_value, s.type_name
             FROM layers l
             JOIN layer_paths lp ON l.layer_id = lp.layer_id
-            WHERE lp.path_value like '%%head/heads/orc/male/%%'
-        ]]))
+            JOIN sheets s ON l.sheet_id = s.sheet_id
+            WHERE lp.path_value like '%%head/heads/%%'
+            AND s.type_name = '%s'
+            ORDER BY RANDOM()
+            LIMIT 1
+        ]], type))
         print("HEAD")
     else
         cursor = conn:execute(string.format([[
-            SELECT l.sheet_id, lp.path_value
+            SELECT l.sheet_id, lp.path_value, s.type_name
             FROM layers l
             JOIN layer_paths lp ON l.layer_id = lp.layer_id
-        ]]))
+            JOIN sheets s ON l.sheet_id = s.sheet_id
+            WHERE s.type_name = '%s'
+            ORDER BY RANDOM()
+            LIMIT 1
+        ]], type))
         print("ELSEE")
     end
 
@@ -398,13 +459,58 @@ function findSheetByType(sheets, typeName)
     end
 
     if #possibleSheets > 0 then
-        -- Return a random sheet of this type
-        -- select * from sheets s join files f on s.sheet_id where f.file_path
-        -- like '%body/bodies/%';
-        -- for k,v in pairs(possibleSheets) do
-        --     print(k,v.id)
-        -- end
         return possibleSheets[love.math.random(1, #possibleSheets)]
+    end
+
+    return nil
+end
+
+
+function findRequiredVariant(sheet_id,type)
+    local cursor
+    print("FINDING VARIANT",sheet_id, type)
+
+    -- select v.variant_id, v.variant_name from variants v join sheets s on s.sheet_id = v.sheet_id where s.sheet_id = 659 and s.type_name = 'shoes';
+    -- select v.variant_id, v.variant_name from variants v joion sheets s on
+    -- s.sheet_id = v.sheet_id where s.sheet_id = 450 and s.type_name = 'body'
+    -- order by random()
+
+    cursor = conn:execute(string.format([[
+        SELECT v.variant_id, v.variant_name
+        FROM variants v
+        JOIN sheets s ON s.sheet_id = v.sheet_id
+        WHERE s.sheet_id = %d
+        AND s.type_name = '%s'
+        ORDER BY RANDOM()
+        LIMIT 1
+    ]], sheet_id, type))
+
+    if cursor then
+        print("CURROR RESULT = true")
+        local row = cursor:fetch({}, "a")
+        if row then
+            return row
+        end
+        cursor:close()
+    end
+    print("COULD NOT FIND VARIANT")
+    return nil
+end
+
+
+function findVariantByType(sheet_id, typeName)
+    -- select v.variant_name from sheets s join variants v on v.sheet_id =
+
+    local possibleVariants = {}
+    print("FIND VARIANTS BY TYPE")
+    local v = findRequiredVariant(sheet_id, typeName)
+    if v ~= nil then
+        print("FOUND VARIANT:",v.variant_name,v.sheet_id)
+        table.insert(possibleVariants, v)
+    end
+
+    if #possibleVariants > 0 then
+        return possibleVariants[love.math.random(1, #possibleVariants)]
     end
 
     return nil
@@ -420,7 +526,8 @@ function getLayerPath(sheetId, type)
             FROM layers l
             JOIN layer_paths lp ON l.layer_id = lp.layer_id
             WHERE l.sheet_id = %d
-            AND lp.path_value like '%%body/bodies%%'
+            ORDER BY RANDOM()
+            LIMIT 1
         ]], sheetId))
         print("GETLAYERPATH BODY")
     elseif type == "head" then
@@ -429,7 +536,8 @@ function getLayerPath(sheetId, type)
             FROM layers l
             JOIN layer_paths lp ON l.layer_id = lp.layer_id
             WHERE l.sheet_id = %d
-            AND lp.path_value like '%%head/heads%%'
+            ORDER BY RANDOM()
+            LIMIT 1
         ]], sheetId))
         print("GETLAYERPATH HEAD")
     else
@@ -438,6 +546,8 @@ function getLayerPath(sheetId, type)
             FROM layers l
             JOIN layer_paths lp ON l.layer_id = lp.layer_id
             WHERE l.sheet_id = %d
+            ORDER BY RANDOM()
+            LIMIT 1
         ]], sheetId))
         print("GETLAYERPATH ELSE")
     end
@@ -459,6 +569,7 @@ function getLayerPath(sheetId, type)
             SELECT file_path
             FROM files
             WHERE sheet_id = %d
+            ORDER BY RANDOM()
             LIMIT 1
         ]], sheetId))
 
@@ -470,9 +581,6 @@ function getLayerPath(sheetId, type)
             cursor:close()
         end
     end
-    -- if path == nil then
-    --     print(type.." is NIL")
-    -- end
 
     return path
 end
@@ -481,7 +589,8 @@ end
 function safeLoadImage(path)
     print("LOADING IMAGE:"..path)
 
-    local success, result = pcall(love.graphics.newImage, path..currentAnimation..".png")
+    -- local success, result = pcall(love.graphics.newImage, path..currentAnimation..".png")
+    local success, result = pcall(love.graphics.newImage, path)
     if success then
         return result
     else
@@ -514,11 +623,6 @@ function loadCharacterImages()
 
     local orderedParts = {}
     for type, part in pairs(character) do
-        if type == "head" then
-            for k,v in pairs(part) do
-                print(k,v)
-            end
-        end
         table.insert(orderedParts, {type = type, part = part, z = zOrder[type] or 1})
     end
 
@@ -759,16 +863,16 @@ function drawCharacterPart(layer, x, y)
                 CHARACTER_SCALE,  -- x scale
                 CHARACTER_SCALE   -- y scale
             )
-        else
-            -- If quad is still missing, show debug placeholder
-            love.graphics.setColor(1, 0, 1)  -- Magenta for missing quads
-            love.graphics.rectangle("fill",
-                x - (SPRITE_WIDTH/4) * CHARACTER_SCALE,
-                y - (SPRITE_HEIGHT/4) * CHARACTER_SCALE,
-                (SPRITE_WIDTH/2) * CHARACTER_SCALE,
-                (SPRITE_HEIGHT/2) * CHARACTER_SCALE
-            )
-            print("Missing all quads for " .. layer.type .. " dir:" .. dirIndex)
+        -- else
+        --     -- If quad is still missing, show debug placeholder
+        --     love.graphics.setColor(1, 0, 1)  -- Magenta for missing quads
+        --     love.graphics.rectangle("fill",
+        --         x - (SPRITE_WIDTH/4) * CHARACTER_SCALE,
+        --         y - (SPRITE_HEIGHT/4) * CHARACTER_SCALE,
+        --         (SPRITE_WIDTH/2) * CHARACTER_SCALE,
+        --         (SPRITE_HEIGHT/2) * CHARACTER_SCALE
+        --     )
+        --     print("Missing all quads for " .. layer.type .. " dir:" .. dirIndex)
         end
     end
 end
