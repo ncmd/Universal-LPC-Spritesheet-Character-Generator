@@ -11,10 +11,9 @@ local ANIMATION_SPEED = 0.2
 
 -- Database configuration
 local DB_FILE = "lpc_spritesheet.db"
-local SPRITE_BASE_PATH = "spritesheets/" -- The base path where your sprite PNG files are stored
+local SPRITE_BASE_PATH = "spritesheets/" -- The base path where sprite PNG files are stored
 
 -- Global variables
-local env           -- SQLite environment
 local conn          -- Database connection
 local character = {} -- Character parts
 local characterLayers = {} -- Loaded character images by layer
@@ -22,21 +21,21 @@ local currentFrame = 1
 local animationTimer = 0
 local currentAnimation = "idle"
 local currentDirection = "south" -- south, west, east, north
-local frameCount = 0
 local availableAnimations = {"idle", "walk", "run", "jump", "slash"}
 local directions = {"south", "west", "east", "north"}
+local spaceWasDown = false
 
 -- Animation frame mappings (start, end frames for each animation)
 local animationFrames = {
-    idle = {1, 4},       -- Example: idle animation uses frames 1-4
-    walk = {5, 12},      -- Example: walk animation uses frames 5-12
-    run = {13, 20},      -- Example: run animation uses frames 13-20
-    jump = {21, 28},     -- Example: jump animation uses frames 21-28
-    slash = {29, 36},    -- Example: slash animation uses frames 29-36
-    spellcast = {37, 44},-- Example: spellcast animation uses frames 37-44
-    thrust = {45, 52},   -- Example: thrust animation uses frames 45-52
-    shoot = {53, 60},    -- Example: shoot animation uses frames 53-60
-    hurt = {61, 64},     -- Example: hurt animation uses frames 61-64
+    idle = {1, 4},       -- idle animation uses frames 1-4
+    walk = {5, 12},      -- walk animation uses frames 5-12
+    run = {13, 20},      -- run animation uses frames 13-20
+    jump = {21, 28},     -- jump animation uses frames 21-28
+    slash = {29, 36},    -- slash animation uses frames 29-36
+    spellcast = {37, 44},-- spellcast animation uses frames 37-44
+    thrust = {45, 52},   -- thrust animation uses frames 45-52
+    shoot = {53, 60},    -- shoot animation uses frames 53-60
+    hurt = {61, 64},     -- hurt animation uses frames 61-64
 }
 
 -- Direction frame row mappings
@@ -46,6 +45,7 @@ local directionRows = {
     east = 3,
     north = 4
 }
+
 -- Function to initialize Love2D
 function love.load()
     -- Set up window
@@ -343,6 +343,18 @@ function getLayerPath(sheetId)
     return path
 end
 
+-- Function to safely load an image file
+function safeLoadImage(path)
+    local success, result = pcall(love.graphics.newImage, path)
+    if success then
+        return result
+    else
+        print("Failed to load image: " .. path)
+        print("Error: " .. tostring(result))
+        return nil
+    end
+end
+
 -- Load character part images
 function loadCharacterImages()
     characterLayers = {}
@@ -376,26 +388,52 @@ function loadCharacterImages()
         local part = item.part
 
         if part.path then
-            -- In a real application, you would need to properly construct file paths
-            -- This is a simplified example
+            -- Construct file path
             local imagePath = SPRITE_BASE_PATH .. part.path
-
-            -- For this demo, we'll create placeholder colored rectangles
-            -- In a real app, you'd load the actual image: love.graphics.newImage(imagePath)
-            local color = getColorForType(item.type)
-
-            table.insert(characterLayers, {
-                type = item.type,
-                color = color,
-                z = item.z
-            })
-
-            print("Added layer: " .. item.type)
+            
+            -- Load the actual spritesheet image
+            local spriteSheet = safeLoadImage(imagePath)
+            
+            if spriteSheet then
+                -- Create quads for the sprite sheet (each frame of animation)
+                local quads = {}
+                
+                -- Create quads for all rows and frames
+                for dir = 1, 4 do  -- 4 directions (south, west, east, north)
+                    quads[dir] = {}
+                    for frame = 1, 64 do  -- Up to 64 frames per animation (max in our animationFrames)
+                        local x = ((frame - 1) % 13) * SPRITE_WIDTH
+                        local y = (dir - 1) * SPRITE_HEIGHT
+                        quads[dir][frame] = love.graphics.newQuad(
+                            x, y, SPRITE_WIDTH, SPRITE_HEIGHT, 
+                            spriteSheet:getWidth(), spriteSheet:getHeight()
+                        )
+                    end
+                end
+                
+                table.insert(characterLayers, {
+                    type = item.type,
+                    spriteSheet = spriteSheet,
+                    quads = quads,
+                    z = item.z
+                })
+                
+                print("Added layer: " .. item.type .. " with spritesheet: " .. imagePath)
+            else
+                -- Fallback to colored rectangle if image loading fails
+                print("Using placeholder for: " .. item.type)
+                table.insert(characterLayers, {
+                    type = item.type,
+                    color = getColorForType(item.type),
+                    z = item.z,
+                    placeholder = true
+                })
+            end
         end
     end
 end
 
--- Get a color for a specific character part type
+-- Get a color for a specific character part type (used for placeholders)
 function getColorForType(partType)
     local colors = {
         body = {0.8, 0.6, 0.5},
@@ -440,24 +478,15 @@ function love.update(dt)
     -- Handle keyboard input for changing animations
     if love.keyboard.isDown("space") and not spaceWasDown then
         -- Cycle through available animations
-        local currentIndex = 1
-        for i, anim in ipairs(availableAnimations) do
-            if anim == currentAnimation then
-                currentIndex = i
-                break
-            end
-        end
-
+        local currentIndex = indexOf(availableAnimations, currentAnimation)
         currentIndex = currentIndex % #availableAnimations + 1
         currentAnimation = availableAnimations[currentIndex]
         currentFrame = 1
+        animationTimer = 0
         spaceWasDown = true
     elseif not love.keyboard.isDown("space") then
         spaceWasDown = false
     end
-
-    -- Reset keysPressed table
-    love.keyboard.keysPressed = {}
 end
 
 -- Draw function
@@ -481,50 +510,73 @@ end
 
 -- Draw a character part
 function drawCharacterPart(layer, x, y)
-    -- In a real application, you'd draw the sprite from the spritesheet
-    -- Here we're just drawing colored rectangles as placeholders
-
-    -- Calculate position based on animation frame and direction
-    local row = directionRows[currentDirection] or 1
-
-    -- Set color for this part
-    love.graphics.setColor(layer.color)
-
-    -- Draw part as a rectangle for this demo
-    -- Adjust shape slightly based on part type
-    local baseWidth = SPRITE_WIDTH * CHARACTER_SCALE * 0.6
-    local baseHeight = SPRITE_HEIGHT * CHARACTER_SCALE * 0.6
-
-    if layer.type == "body" then
-        love.graphics.rectangle("fill", x - baseWidth/2, y - baseHeight/2, baseWidth, baseHeight)
-    elseif layer.type == "head" then
-        local headSize = baseWidth * 0.5
-        love.graphics.circle("fill", x, y - baseHeight/2, headSize/2)
-    elseif layer.type == "hair" then
-        local headSize = baseWidth * 0.5
-        love.graphics.setColor(layer.color[1], layer.color[2], layer.color[3], 0.8)
-        love.graphics.circle("fill", x, y - baseHeight/2, headSize/2 * 1.1)
-    elseif layer.type == "torso" then
-        love.graphics.rectangle("fill", x - baseWidth/2 * 0.8, y - baseHeight/2 * 0.7, baseWidth * 0.8, baseHeight * 0.7)
-    elseif layer.type == "legs" then
-        love.graphics.rectangle("fill", x - baseWidth/2 * 0.7, y, baseWidth * 0.3, baseHeight * 0.7)
-        love.graphics.rectangle("fill", x + baseWidth/2 * 0.4, y, baseWidth * 0.3, baseHeight * 0.7)
-    elseif layer.type == "feet" then
-        love.graphics.rectangle("fill", x - baseWidth/2 * 0.8, y + baseHeight/2 * 0.6, baseWidth * 0.4, baseHeight * 0.2)
-        love.graphics.rectangle("fill", x + baseWidth/2 * 0.4, y + baseHeight/2 * 0.6, baseWidth * 0.4, baseHeight * 0.2)
-    elseif layer.type == "arms" then
-        if currentAnimation == "slash" then
-            -- Raised arm for slashing
-            love.graphics.rectangle("fill", x + baseWidth/2 * 0.5, y - baseHeight/2 * 0.5, baseWidth * 0.2, baseHeight * 0.6)
-            love.graphics.rectangle("fill", x - baseWidth/2 * 0.7, y - baseHeight/2 * 0.5, baseWidth * 0.2, baseHeight * 0.6)
+    -- Calculate animation frame (actual frame in the animation)
+    local anim = animationFrames[currentAnimation] or {1, 1}
+    local startFrame = anim[1]
+    local actualFrame = startFrame + currentFrame - 1
+    
+    -- Get direction row
+    local dirIndex = directionRows[currentDirection] or 1
+    
+    -- Draw either sprite or placeholder
+    if layer.placeholder then
+        -- Draw placeholder if no sprite available
+        love.graphics.setColor(layer.color)
+        
+        -- Draw part as a rectangle for placeholder
+        local baseWidth = SPRITE_WIDTH * CHARACTER_SCALE * 0.6
+        local baseHeight = SPRITE_HEIGHT * CHARACTER_SCALE * 0.6
+        
+        if layer.type == "body" then
+            love.graphics.rectangle("fill", x - baseWidth/2, y - baseHeight/2, baseWidth, baseHeight)
+        elseif layer.type == "head" then
+            local headSize = baseWidth * 0.5
+            love.graphics.circle("fill", x, y - baseHeight/2, headSize/2)
+        elseif layer.type == "hair" then
+            local headSize = baseWidth * 0.5
+            love.graphics.setColor(layer.color[1], layer.color[2], layer.color[3], 0.8)
+            love.graphics.circle("fill", x, y - baseHeight/2, headSize/2 * 1.1)
+        elseif layer.type == "torso" then
+            love.graphics.rectangle("fill", x - baseWidth/2 * 0.8, y - baseHeight/2 * 0.7, baseWidth * 0.8, baseHeight * 0.7)
+        elseif layer.type == "legs" then
+            love.graphics.rectangle("fill", x - baseWidth/2 * 0.7, y, baseWidth * 0.3, baseHeight * 0.7)
+            love.graphics.rectangle("fill", x + baseWidth/2 * 0.4, y, baseWidth * 0.3, baseHeight * 0.7)
+        elseif layer.type == "feet" then
+            love.graphics.rectangle("fill", x - baseWidth/2 * 0.8, y + baseHeight/2 * 0.6, baseWidth * 0.4, baseHeight * 0.2)
+            love.graphics.rectangle("fill", x + baseWidth/2 * 0.4, y + baseHeight/2 * 0.6, baseWidth * 0.4, baseHeight * 0.2)
+        elseif layer.type == "arms" then
+            if currentAnimation == "slash" then
+                -- Raised arm for slashing
+                love.graphics.rectangle("fill", x + baseWidth/2 * 0.5, y - baseHeight/2 * 0.5, baseWidth * 0.2, baseHeight * 0.6)
+                love.graphics.rectangle("fill", x - baseWidth/2 * 0.7, y - baseHeight/2 * 0.5, baseWidth * 0.2, baseHeight * 0.6)
+            else
+                -- Normal arms
+                love.graphics.rectangle("fill", x + baseWidth/2 * 0.7, y - baseHeight/2 * 0.3, baseWidth * 0.2, baseHeight * 0.6)
+                love.graphics.rectangle("fill", x - baseWidth/2 * 0.9, y - baseHeight/2 * 0.3, baseWidth * 0.2, baseHeight * 0.6)
+            end
         else
-            -- Normal arms
-            love.graphics.rectangle("fill", x + baseWidth/2 * 0.7, y - baseHeight/2 * 0.3, baseWidth * 0.2, baseHeight * 0.6)
-            love.graphics.rectangle("fill", x - baseWidth/2 * 0.9, y - baseHeight/2 * 0.3, baseWidth * 0.2, baseHeight * 0.6)
+            -- Generic part
+            love.graphics.rectangle("fill", x - baseWidth/4, y - baseHeight/4, baseWidth/2, baseHeight/2)
         end
     else
-        -- Generic part
-        love.graphics.rectangle("fill", x - baseWidth/4, y - baseHeight/4, baseWidth/2, baseHeight/2)
+        -- Draw actual sprite from spritesheet
+        love.graphics.setColor(1, 1, 1)  -- Reset color to white for proper sprite rendering
+        
+        -- Draw the sprite with proper scaling
+        if layer.spriteSheet and layer.quads and layer.quads[dirIndex] and layer.quads[dirIndex][actualFrame] then
+            love.graphics.draw(
+                layer.spriteSheet,
+                layer.quads[dirIndex][actualFrame],
+                x - (SPRITE_WIDTH * CHARACTER_SCALE / 2),  -- Center horizontally
+                y - (SPRITE_HEIGHT * CHARACTER_SCALE / 2), -- Center vertically
+                0,  -- rotation (none)
+                CHARACTER_SCALE,  -- x scale
+                CHARACTER_SCALE   -- y scale
+            )
+        else
+            -- If quad is missing, print debug info
+            print("Missing quad for " .. layer.type .. " dir:" .. dirIndex .. " frame:" .. actualFrame)
+        end
     end
 end
 
@@ -541,6 +593,12 @@ function drawUI()
     -- Draw current character info
     love.graphics.print("Animation: " .. currentAnimation, 20, 120)
     love.graphics.print("Direction: " .. currentDirection, 20, 140)
+    
+    -- Get frame info for current animation
+    local anim = animationFrames[currentAnimation] or {1, 1}
+    local startFrame, endFrame = anim[1], anim[2]
+    local frameCount = endFrame - startFrame + 1
+    
     love.graphics.print("Frame: " .. currentFrame .. "/" .. frameCount, 20, 160)
 
     -- Draw character composition
@@ -562,15 +620,7 @@ function love.keypressed(key)
         generateRandomCharacter()
         loadCharacterImages()
     elseif key == "space" then
-        -- Change animation
-        local currentIndex = indexOf(availableAnimations, currentAnimation)
-        currentIndex = currentIndex + 1
-        if currentIndex > #availableAnimations then
-            currentIndex = 1
-        end
-        currentAnimation = availableAnimations[currentIndex]
-        currentFrame = 1
-        animationTimer = 0
+        -- Change animation (handled in update)
     elseif key == "up" then
         currentDirection = "north"
     elseif key == "down" then
@@ -596,9 +646,5 @@ end
 function love.quit()
     if conn then
         conn:close()
-    end
-
-    if env then
-        env:close()
     end
 end
