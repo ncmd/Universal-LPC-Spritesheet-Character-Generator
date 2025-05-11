@@ -21,29 +21,36 @@ local currentFrame = 1
 local animationTimer = 0
 local currentAnimation = "idle"
 local currentDirection = "south" -- south, west, east, north
-local availableAnimations = {"idle", "walk", "run", "jump", "slash"}
+local availableAnimations = {"idle", "walk", "run", "jump", "slash", "cast", "thrust",  "hurt", "backslash", "climb", "combat_idle", "emote", "sit", "halfslash"}
 local directions = {"south", "west", "east", "north"}
 local spaceWasDown = false
 
 -- Animation frame mappings (start, end frames for each animation)
 local animationFrames = {
-    idle = {1, 4},       -- idle animation uses frames 1-4
-    walk = {5, 12},      -- walk animation uses frames 5-12
-    run = {13, 20},      -- run animation uses frames 13-20
-    jump = {21, 28},     -- jump animation uses frames 21-28
-    slash = {29, 36},    -- slash animation uses frames 29-36
-    spellcast = {37, 44},-- spellcast animation uses frames 37-44
-    thrust = {45, 52},   -- thrust animation uses frames 45-52
-    shoot = {53, 60},    -- shoot animation uses frames 53-60
-    hurt = {61, 64},     -- hurt animation uses frames 61-64
+    idle = {1, 2},
+    walk = {1, 9},
+    run = {1, 8},
+    jump = {1,  5},
+    slash = {1, 6},
+    spellcast = {1, 7},
+    thrust = {1, 8},
+    shoot = {1, 13},
+    hurt = {1, 6},
+    cast = {1,7},
+    backslash = {1,14},
+    climb = {1,6},
+    combat_idle = {1,2},
+    emote = {1,3},
+    sit = {1,3},
+    halfslash = {1,6},
 }
 
 -- Direction frame row mappings
 local directionRows = {
     south = 1,
     west = 2,
-    east = 3,
-    north = 4
+    east = 4,
+    north = 3
 }
 
 -- Function to initialize Love2D
@@ -180,11 +187,19 @@ function love.load()
     loadCharacterImages()
 
     print("Character generated successfully!")
+    for k,v in pairs(character) do
+        if k == "head" then
+            print(k,v)
+        end
+    end
 end
 
 -- Function to generate a random character from database
 function generateRandomCharacter()
     -- Query available sheets
+    --
+    -- select * from sheets s join files f on s.sheet_id where f.file_path
+    -- like '%body/bodies/%';
     local cursor = conn:execute("SELECT sheet_id, name, type_name FROM sheets")
 
     local sheets = {}
@@ -205,7 +220,19 @@ function generateRandomCharacter()
             sheet_id = bodySheet.sheet_id,
             name = bodySheet.name,
             type = bodySheet.type_name,
-            path = getLayerPath(bodySheet.sheet_id)
+            path = getLayerPath(bodySheet.sheet_id, "body")
+        }
+    end
+
+    -- Base head
+    local headSheet = findSheetByType(sheets, "head")
+    if headSheet then
+        print("HEADDD:"..headSheet.name)
+        character.head = {
+            sheet_id = headSheet.sheet_id,
+            name = headSheet.name,
+            type = headSheet.type_name,
+            path = getLayerPath(headSheet.sheet_id, "head")
         }
     end
 
@@ -215,17 +242,18 @@ function generateRandomCharacter()
         SELECT s.sheet_id, s.name, s.type_name
         FROM sheets s
         WHERE s.type_name != 'body'
+        AND s.type_name != 'head'
         ORDER BY RANDOM()
     ]])
 
-    local addedTypes = {body = true} -- Track added types to avoid duplicates
+    local addedTypes = {head = true, body = true, face = true, arms = true} -- Track added types to avoid duplicates
 
     local row = cursor:fetch({}, "a")
     while row do
         -- Only add if we don't have this type yet
         if not addedTypes[row.type_name] then
             -- 50% chance to add this part (for more variety)
-            if love.math.random() > 0.5 then
+            -- if love.math.random() > 0.5 then
                 character[row.type_name] = {
                     sheet_id = row.sheet_id,
                     name = row.name,
@@ -233,7 +261,7 @@ function generateRandomCharacter()
                     path = getLayerPath(row.sheet_id)
                 }
                 addedTypes[row.type_name] = true
-            end
+            -- end
         end
 
         row = cursor:fetch({}, "a")
@@ -250,7 +278,6 @@ function generateRandomCharacter()
         SELECT DISTINCT a.animation_name
         FROM animations a
         JOIN sheets s ON a.sheet_id = s.sheet_id
-        WHERE s.type_name = 'body'
     ]])
 
     local row = cursor:fetch({}, "a")
@@ -266,8 +293,29 @@ function generateRandomCharacter()
 end
 
 -- Function to make sure we have basic parts for a complete character
+-- the problem is choosing a random head does not choose the base 
+-- 
+-- ▾ head/
+--     ▸ ears/
+--     ▸ faces/
+--     ▸ fins/
+--     ▾ heads/
+--       ▸ alien/adult/
+--       ▸ boarman/
+--       ▸ frankenstein/
+--       ▾ goblin/
+--         ▾ adult/
+--           ▸ backslash/
+--           ▸ climb/
+--           ▸ combat_idle/
+--           ▸ emote/
+--           ▸ halfslash/
+--           ▸ hurt/
+--           ▾ idle/
+--               amber.png
 function ensureBasicParts(sheets)
-    local essentialTypes = {"body", "head", "hair"}
+    -- local essentialTypes = {"eyes","body", "head", "hair", "arms","legs", "feet"}
+    local essentialTypes = {"eyes","body", "head", "hair", "arms","legs", "feet"}
 
     for _, essentialType in ipairs(essentialTypes) do
         if not character[essentialType] then
@@ -277,25 +325,85 @@ function ensureBasicParts(sheets)
                     sheet_id = sheet.sheet_id,
                     name = sheet.name,
                     type = sheet.type_name,
-                    path = getLayerPath(sheet.sheet_id)
+                    path = getLayerPath(sheet.sheet_id, essentialType)
                 }
             end
         end
     end
 end
 
+
+function findRequiredSheet(sheets,type)
+    local cursor
+    print("FINDING REQAUIRED SHEET")
+
+    if type == "body" then
+        cursor = conn:execute(string.format([[
+            SELECT l.sheet_id, lp.path_value
+            FROM layers l
+            JOIN layer_paths lp ON l.layer_id = lp.layer_id
+            WHERE lp.path_value like '%%body/bodies/male/%%'
+        ]]))
+        print("BODY")
+    elseif type == "head" then
+        cursor = conn:execute(string.format([[
+            SELECT l.sheet_id, lp.path_value
+            FROM layers l
+            JOIN layer_paths lp ON l.layer_id = lp.layer_id
+            WHERE lp.path_value like '%%head/heads/orc/male/%%'
+        ]]))
+        print("HEAD")
+    else
+        cursor = conn:execute(string.format([[
+            SELECT l.sheet_id, lp.path_value
+            FROM layers l
+            JOIN layer_paths lp ON l.layer_id = lp.layer_id
+        ]]))
+        print("ELSEE")
+    end
+
+    if cursor then
+        print("CURROR RESULT = true")
+        local row = cursor:fetch({}, "a")
+        if row then
+            print("CURROR RESULT 2")
+            local sheet_id = row.sheet_id
+
+            for _, sheet in ipairs(sheets) do
+                if sheet.sheet_id == sheet_id then
+                    print("FOUND SHEET: "..sheet_id)
+                    return sheet
+                end
+            end
+        end
+        cursor:close()
+    end
+    print("COULD NOT FIND SHEET")
+    return nil
+end
+
 -- Find a sheet by its type
 function findSheetByType(sheets, typeName)
     local possibleSheets = {}
+    print("FIND SHEET BY TYPE")
 
     for _, sheet in ipairs(sheets) do
         if sheet.type_name == typeName then
-            table.insert(possibleSheets, sheet)
+            local s = findRequiredSheet(sheets, typeName)
+            if s ~= nil then
+                print("FOUND SHEET:",s.sheet_id)
+                table.insert(possibleSheets, s)
+            end
         end
     end
 
     if #possibleSheets > 0 then
         -- Return a random sheet of this type
+        -- select * from sheets s join files f on s.sheet_id where f.file_path
+        -- like '%body/bodies/%';
+        -- for k,v in pairs(possibleSheets) do
+        --     print(k,v.id)
+        -- end
         return possibleSheets[love.math.random(1, #possibleSheets)]
     end
 
@@ -303,21 +411,44 @@ function findSheetByType(sheets, typeName)
 end
 
 -- Get the file path for a sheet layer
-function getLayerPath(sheetId)
-    local cursor = conn:execute(string.format([[
-        SELECT lp.path_value
-        FROM layers l
-        JOIN layer_paths lp ON l.layer_id = lp.layer_id
-        WHERE l.sheet_id = %d
-        AND lp.path_type = 'default'
-        LIMIT 1
-    ]], sheetId))
+function getLayerPath(sheetId, type)
+    local cursor
+
+    if type == "body" then
+        cursor = conn:execute(string.format([[
+            SELECT lp.path_value
+            FROM layers l
+            JOIN layer_paths lp ON l.layer_id = lp.layer_id
+            WHERE l.sheet_id = %d
+            AND lp.path_value like '%%body/bodies%%'
+        ]], sheetId))
+        print("GETLAYERPATH BODY")
+    elseif type == "head" then
+        cursor = conn:execute(string.format([[
+            SELECT lp.path_value
+            FROM layers l
+            JOIN layer_paths lp ON l.layer_id = lp.layer_id
+            WHERE l.sheet_id = %d
+            AND lp.path_value like '%%head/heads%%'
+        ]], sheetId))
+        print("GETLAYERPATH HEAD")
+    else
+        cursor = conn:execute(string.format([[
+            SELECT lp.path_value
+            FROM layers l
+            JOIN layer_paths lp ON l.layer_id = lp.layer_id
+            WHERE l.sheet_id = %d
+        ]], sheetId))
+        print("GETLAYERPATH ELSE")
+    end
 
     local path = nil
     if cursor then
+        print("GETLAYERPATH")
         local row = cursor:fetch({}, "a")
         if row then
             path = row.path_value
+            print("GETLAYERPATH PATH:"..path)
         end
         cursor:close()
     end
@@ -339,13 +470,18 @@ function getLayerPath(sheetId)
             cursor:close()
         end
     end
+    -- if path == nil then
+    --     print(type.." is NIL")
+    -- end
 
     return path
 end
 
 -- Function to safely load an image file
 function safeLoadImage(path)
-    local success, result = pcall(love.graphics.newImage, path)
+    print("LOADING IMAGE:"..path)
+
+    local success, result = pcall(love.graphics.newImage, path..currentAnimation..".png")
     if success then
         return result
     else
@@ -366,7 +502,7 @@ function loadCharacterImages()
         feet = 30,
         torso = 40,
         arms = 50,
-        hands = 60,
+        hands = 500,
         head = 70,
         eyes = 80,
         nose = 90,
@@ -378,7 +514,12 @@ function loadCharacterImages()
 
     local orderedParts = {}
     for type, part in pairs(character) do
-        table.insert(orderedParts, {type = type, part = part, z = zOrder[type] or 500})
+        if type == "head" then
+            for k,v in pairs(part) do
+                print(k,v)
+            end
+        end
+        table.insert(orderedParts, {type = type, part = part, z = zOrder[type] or 1})
     end
 
     table.sort(orderedParts, function(a, b) return a.z < b.z end)
@@ -390,14 +531,15 @@ function loadCharacterImages()
         if part.path then
             -- Construct file path
             local imagePath = SPRITE_BASE_PATH .. part.path
-            
+            print(part.path)
+
             -- Load the actual spritesheet image
             local spriteSheet = safeLoadImage(imagePath)
-            
+
             if spriteSheet then
                 -- Create quads for the sprite sheet (each frame of animation)
                 local quads = {}
-                
+
                 -- Create quads for all rows and frames
                 for dir = 1, 4 do  -- 4 directions (south, west, east, north)
                     quads[dir] = {}
@@ -405,19 +547,19 @@ function loadCharacterImages()
                         local x = ((frame - 1) % 13) * SPRITE_WIDTH
                         local y = (dir - 1) * SPRITE_HEIGHT
                         quads[dir][frame] = love.graphics.newQuad(
-                            x, y, SPRITE_WIDTH, SPRITE_HEIGHT, 
+                            x, y, SPRITE_WIDTH, SPRITE_HEIGHT,
                             spriteSheet:getWidth(), spriteSheet:getHeight()
                         )
                     end
                 end
-                
+
                 table.insert(characterLayers, {
                     type = item.type,
                     spriteSheet = spriteSheet,
                     quads = quads,
                     z = item.z
                 })
-                
+
                 print("Added layer: " .. item.type .. " with spritesheet: " .. imagePath)
             else
                 -- Fallback to colored rectangle if image loading fails
@@ -500,7 +642,7 @@ function love.draw()
     local y = WINDOW_HEIGHT / 2
 
     -- Draw character parts
-    for _, layer in ipairs(characterLayers) do
+    for _,layer in ipairs(characterLayers) do
         drawCharacterPart(layer, x, y)
     end
 
@@ -514,28 +656,56 @@ function drawCharacterPart(layer, x, y)
     local anim = animationFrames[currentAnimation] or {1, 1}
     local startFrame = anim[1]
     local actualFrame = startFrame + currentFrame - 1
-    
+
+    -- Limit frame to maximum available
+    actualFrame = math.min(actualFrame, 64) -- Don't go beyond our max frames
+
     -- Get direction row
     local dirIndex = directionRows[currentDirection] or 1
-    
+
+    -- Apply minor offsets based on part type for better alignment
+    local offsetX, offsetY = 0, 0
+
+    -- Part-specific offsets to improve alignment
+    if layer.type == "head" then
+        offsetY = -5 * CHARACTER_SCALE  -- Move head up slightly
+    elseif layer.type == "hair" then
+        offsetY = -5 * CHARACTER_SCALE  -- Align hair with head
+    elseif layer.type == "facial_hair" then
+        offsetY = -3 * CHARACTER_SCALE  -- Align facial hair with head
+    elseif layer.type == "eyes" or layer.type == "nose" or layer.type == "ears" then
+        offsetY = -5 * CHARACTER_SCALE  -- Align face features with head
+    end
+
+    -- Animation-specific adjustments
+    if currentAnimation == "walk" or currentAnimation == "run" then
+        -- Add slight vertical bounce for walk/run animations
+        local bounceAmount = 2
+        if currentAnimation == "run" then bounceAmount = 3 end
+
+        -- Apply a sine wave bounce effect based on frame
+        local bounce = math.sin(currentFrame * math.pi / 2) * bounceAmount
+        offsetY = offsetY + bounce
+    end
+
     -- Draw either sprite or placeholder
-    if layer.placeholder then
+    if 1 == 2 then -- layer.placeholder then
         -- Draw placeholder if no sprite available
         love.graphics.setColor(layer.color)
-        
+
         -- Draw part as a rectangle for placeholder
         local baseWidth = SPRITE_WIDTH * CHARACTER_SCALE * 0.6
         local baseHeight = SPRITE_HEIGHT * CHARACTER_SCALE * 0.6
-        
+
         if layer.type == "body" then
             love.graphics.rectangle("fill", x - baseWidth/2, y - baseHeight/2, baseWidth, baseHeight)
         elseif layer.type == "head" then
             local headSize = baseWidth * 0.5
-            love.graphics.circle("fill", x, y - baseHeight/2, headSize/2)
+            love.graphics.circle("fill", x, y - baseHeight/2 + offsetY, headSize/2)
         elseif layer.type == "hair" then
             local headSize = baseWidth * 0.5
             love.graphics.setColor(layer.color[1], layer.color[2], layer.color[3], 0.8)
-            love.graphics.circle("fill", x, y - baseHeight/2, headSize/2 * 1.1)
+            love.graphics.circle("fill", x, y - baseHeight/2 + offsetY, headSize/2 * 1.1)
         elseif layer.type == "torso" then
             love.graphics.rectangle("fill", x - baseWidth/2 * 0.8, y - baseHeight/2 * 0.7, baseWidth * 0.8, baseHeight * 0.7)
         elseif layer.type == "legs" then
@@ -561,21 +731,44 @@ function drawCharacterPart(layer, x, y)
     else
         -- Draw actual sprite from spritesheet
         love.graphics.setColor(1, 1, 1)  -- Reset color to white for proper sprite rendering
-        
-        -- Draw the sprite with proper scaling
-        if layer.spriteSheet and layer.quads and layer.quads[dirIndex] and layer.quads[dirIndex][actualFrame] then
+
+        -- Check if we have the quad, if not, try to use first frame
+        local quadAvailable = layer.quads and
+                              layer.quads[dirIndex] and
+                              layer.quads[dirIndex][actualFrame]
+
+        if not quadAvailable and layer.quads and layer.quads[dirIndex] then
+            -- Try to use first frame if specified frame doesn't exist
+            for i=1, 64 do
+                if layer.quads[dirIndex][i] then
+                    actualFrame = i
+                    quadAvailable = true
+                    break
+                end
+            end
+        end
+
+        -- Draw the sprite with proper scaling if quad is available
+        if quadAvailable then
             love.graphics.draw(
                 layer.spriteSheet,
                 layer.quads[dirIndex][actualFrame],
-                x - (SPRITE_WIDTH * CHARACTER_SCALE / 2),  -- Center horizontally
-                y - (SPRITE_HEIGHT * CHARACTER_SCALE / 2), -- Center vertically
+                x - (SPRITE_WIDTH * CHARACTER_SCALE / 2) + offsetX,  -- Center horizontally with offset
+                y - (SPRITE_HEIGHT * CHARACTER_SCALE / 2) + offsetY, -- Center vertically with offset
                 0,  -- rotation (none)
                 CHARACTER_SCALE,  -- x scale
                 CHARACTER_SCALE   -- y scale
             )
         else
-            -- If quad is missing, print debug info
-            print("Missing quad for " .. layer.type .. " dir:" .. dirIndex .. " frame:" .. actualFrame)
+            -- If quad is still missing, show debug placeholder
+            love.graphics.setColor(1, 0, 1)  -- Magenta for missing quads
+            love.graphics.rectangle("fill",
+                x - (SPRITE_WIDTH/4) * CHARACTER_SCALE,
+                y - (SPRITE_HEIGHT/4) * CHARACTER_SCALE,
+                (SPRITE_WIDTH/2) * CHARACTER_SCALE,
+                (SPRITE_HEIGHT/2) * CHARACTER_SCALE
+            )
+            print("Missing all quads for " .. layer.type .. " dir:" .. dirIndex)
         end
     end
 end
@@ -593,12 +786,12 @@ function drawUI()
     -- Draw current character info
     love.graphics.print("Animation: " .. currentAnimation, 20, 120)
     love.graphics.print("Direction: " .. currentDirection, 20, 140)
-    
+
     -- Get frame info for current animation
     local anim = animationFrames[currentAnimation] or {1, 1}
     local startFrame, endFrame = anim[1], anim[2]
     local frameCount = endFrame - startFrame + 1
-    
+
     love.graphics.print("Frame: " .. currentFrame .. "/" .. frameCount, 20, 160)
 
     -- Draw character composition
@@ -616,7 +809,7 @@ function love.keypressed(key)
     if key == "escape" then
         love.event.quit()
     elseif key == "r" then
-        -- Generate new random character
+
         generateRandomCharacter()
         loadCharacterImages()
     elseif key == "space" then
