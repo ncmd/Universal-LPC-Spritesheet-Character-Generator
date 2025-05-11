@@ -1,448 +1,604 @@
--- LPC Character Generator Demo
--- Using Love2D to display character components from the database
+-- LPC Character Generator using SQLite Database
+-- This demo loads character parts from an SQLite database and renders a random character
 
-local LpcDatabase = require("lpc_database")
+-- Constants
+local WINDOW_WIDTH = 800
+local WINDOW_HEIGHT = 600
+local CHARACTER_SCALE = 3
+local SPRITE_WIDTH = 64  -- Standard LPC sprite width
+local SPRITE_HEIGHT = 64 -- Standard LPC sprite height
+local ANIMATION_SPEED = 0.2
+
+-- Database configuration
+local DB_FILE = "lpc_spritesheet.db"
+local SPRITE_BASE_PATH = "spritesheets/" -- The base path where your sprite PNG files are stored
 
 -- Global variables
-local db = nil
-local categories = {}
-local selected_category = nil
-local component_types = {}
-local selected_component_type = nil
-local components = {}
-local selected_component = nil
-local variants = {}
-local selected_variant = nil
-local animations = {}
-local selected_animation = nil
-local body_types = {}
-local selected_body_type = nil
+local env           -- SQLite environment
+local conn          -- Database connection
+local character = {} -- Character parts
+local characterLayers = {} -- Loaded character images by layer
+local currentFrame = 1
+local animationTimer = 0
+local currentAnimation = "idle"
+local currentDirection = "south" -- south, west, east, north
+local frameCount = 0
+local availableAnimations = {"idle", "walk", "run", "jump", "slash"}
+local directions = {"south", "west", "east", "north"}
 
-local asset_files = {}
-local sprites = {}
-local current_frame = 1
-local animation_timer = 0
-local animation_speed = 0.1 -- seconds per frame
-
--- UI state
-local ui = {
-    sidebar_width = 300,
-    item_height = 30,
-    scroll_y = 0,
-    max_scroll = 0
+-- Animation frame mappings (start, end frames for each animation)
+local animationFrames = {
+    idle = {1, 4},       -- Example: idle animation uses frames 1-4
+    walk = {5, 12},      -- Example: walk animation uses frames 5-12
+    run = {13, 20},      -- Example: run animation uses frames 13-20
+    jump = {21, 28},     -- Example: jump animation uses frames 21-28
+    slash = {29, 36},    -- Example: slash animation uses frames 29-36
+    spellcast = {37, 44},-- Example: spellcast animation uses frames 37-44
+    thrust = {45, 52},   -- Example: thrust animation uses frames 45-52
+    shoot = {53, 60},    -- Example: shoot animation uses frames 53-60
+    hurt = {61, 64},     -- Example: hurt animation uses frames 61-64
 }
 
+-- Direction frame row mappings
+local directionRows = {
+    south = 1,
+    west = 2,
+    east = 3,
+    north = 4
+}
+-- Function to initialize Love2D
 function love.load()
-    love.window.setTitle("LPC Character Generator Demo")
-    love.window.setMode(1024, 768)
-    
-    -- Initialize database
-    db = LpcDatabase.new()
-    
-    -- Check if the dump file exists, if not, create it
-    if not love.filesystem.getInfo("lpc_character_generator_dump.sql") then
-        -- Copy the schema file to the save directory
-        local schema = love.filesystem.read("lpc_character_generator.sql")
-        if schema then
-            love.filesystem.write("lpc_character_generator_dump.sql", schema)
-            print("Created dump file from schema")
-        else
-            print("Warning: Could not find schema file")
-        end
-    end
-    
-    -- Load database
-    local success, err = pcall(function()
-        db:database_load()
-    end)
-    
-    if not success then
-        print("Database load error: " .. tostring(err))
+    -- Set up window
+    love.window.setTitle("LPC Character Generator")
+    love.window.setMode(WINDOW_WIDTH, WINDOW_HEIGHT)
+
+    local ffi = require("ffi")
+
+    -- C definitions for SQLite
+    ffi.cdef[[
+        typedef struct sqlite3 sqlite3;
+        typedef struct sqlite3_stmt sqlite3_stmt;
+
+        typedef int (*sqlite3_callback)(void*,int,char**,char**);
+
+        int sqlite3_open(const char *filename, sqlite3 **ppDb);
+        int sqlite3_close(sqlite3*);
+        int sqlite3_exec(sqlite3*, const char *sql, sqlite3_callback, void*, char **errmsg);
+        const char *sqlite3_errmsg(sqlite3*);
+
+        int sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte,
+                               sqlite3_stmt **ppStmt, const char **pzTail);
+        int sqlite3_step(sqlite3_stmt*);
+        int sqlite3_finalize(sqlite3_stmt*);
+        int sqlite3_column_count(sqlite3_stmt*);
+        const char *sqlite3_column_name(sqlite3_stmt*, int);
+        int sqlite3_column_type(sqlite3_stmt*, int);
+        const unsigned char *sqlite3_column_text(sqlite3_stmt*, int);
+        int sqlite3_column_int(sqlite3_stmt*, int);
+        double sqlite3_column_double(sqlite3_stmt*, int);
+    ]]
+
+    -- Load the SQLite3 library
+    local sqlite3 = ffi.load("sqlite3")
+
+    -- Open database
+    local db_ptr = ffi.new("sqlite3*[1]")
+    local abs_path = DB_FILE
+    local result = sqlite3.sqlite3_open(abs_path, db_ptr)
+
+    if result ~= 0 then
+        print("Failed to open database: " .. ffi.string(sqlite3.sqlite3_errmsg(db_ptr[0])))
+        love.event.quit()
         return
     end
-    
-    -- Load categories
-    categories = db:get_categories()
-    
-    -- Set default selections
-    if #categories > 0 then
-        selected_category = categories[1]
-        load_component_types()
+
+    local db = db_ptr[0]
+
+    -- Create a wrapper for SQLite to mimic the Lua-SQLite interface
+    conn = {
+        db = db,
+        sqlite3 = sqlite3,
+
+        -- Execute a SQL query and return a cursor
+        execute = function(self, sql)
+            local stmt_ptr = ffi.new("sqlite3_stmt*[1]")
+            local result = self.sqlite3.sqlite3_prepare_v2(self.db, sql, #sql, stmt_ptr, nil)
+
+            if result ~= 0 then
+                error("SQL error: " .. ffi.string(self.sqlite3.sqlite3_errmsg(self.db)))
+            end
+
+            local cursor = {
+                stmt = stmt_ptr[0],
+                sqlite3 = self.sqlite3,
+
+                -- Fetch the next row
+                fetch = function(self, t, mode)
+                    local result = self.sqlite3.sqlite3_step(self.stmt)
+
+                    if result ~= 100 then -- SQLITE_ROW = 100
+                        return nil
+                    end
+
+                    local row = t or {}
+                    local num_cols = self.sqlite3.sqlite3_column_count(self.stmt)
+
+                    for i = 0, num_cols - 1 do
+                        local name = ffi.string(self.sqlite3.sqlite3_column_name(self.stmt, i))
+                        local value
+
+                        local col_type = self.sqlite3.sqlite3_column_type(self.stmt, i)
+
+                        if col_type == 1 then -- SQLITE_INTEGER
+                            value = self.sqlite3.sqlite3_column_int(self.stmt, i)
+                        elseif col_type == 2 then -- SQLITE_FLOAT
+                            value = self.sqlite3.sqlite3_column_double(self.stmt, i)
+                        elseif col_type == 3 then -- SQLITE_TEXT
+                            value = ffi.string(self.sqlite3.sqlite3_column_text(self.stmt, i))
+                        elseif col_type == 4 then -- SQLITE_BLOB
+                            -- Not handling blobs in this simplified version
+                            value = nil
+                        else -- SQLITE_NULL or other
+                            value = nil
+                        end
+
+                        if mode == "a" then
+                            row[name] = value
+                        else
+                            table.insert(row, value)
+                        end
+                    end
+
+                    return row
+                end,
+
+                -- Close the cursor
+                close = function(self)
+                    self.sqlite3.sqlite3_finalize(self.stmt)
+                end
+            }
+
+            return cursor
+        end,
+
+        -- Close the connection
+        close = function(self)
+            self.sqlite3.sqlite3_close(self.db)
+        end
+    }
+
+    if not conn then
+        print("Failed to connect to database!")
+        love.event.quit()
+        return
     end
-    
-    -- Load fonts
-    love.graphics.setNewFont(14)
+
+    -- Generate a random character
+    generateRandomCharacter()
+
+    -- Load character parts as images
+    loadCharacterImages()
+
+    print("Character generated successfully!")
 end
 
-function load_component_types()
-    if selected_category then
-        component_types = db:get_component_types(selected_category.id)
-        selected_component_type = component_types[1]
-        load_components()
+-- Function to generate a random character from database
+function generateRandomCharacter()
+    -- Query available sheets
+    local cursor = conn:execute("SELECT sheet_id, name, type_name FROM sheets")
+
+    local sheets = {}
+    local row = cursor:fetch({}, "a")
+    while row do
+        table.insert(sheets, row)
+        row = cursor:fetch({}, "a")
     end
-end
+    cursor:close()
 
-function load_components()
-    if selected_component_type then
-        components = db:get_components(selected_component_type.id)
-        selected_component = components[1]
-        load_variants()
+    -- Build character layer by layer
+    character = {}
+
+    -- Base body
+    local bodySheet = findSheetByType(sheets, "body")
+    if bodySheet then
+        character.body = {
+            sheet_id = bodySheet.sheet_id,
+            name = bodySheet.name,
+            type = bodySheet.type_name,
+            path = getLayerPath(bodySheet.sheet_id)
+        }
     end
-end
 
-function load_variants()
-    if selected_component then
-        variants = db:get_variants(selected_component.id)
-        selected_variant = variants[1]
-        load_animations()
-    end
-end
+    -- Add other parts (head, hair, clothes, etc.)
+    -- We'll add parts in the right Z-order based on the database
+    local cursor = conn:execute([[
+        SELECT s.sheet_id, s.name, s.type_name
+        FROM sheets s
+        WHERE s.type_name != 'body'
+        ORDER BY RANDOM()
+    ]])
 
-function load_animations()
-    if selected_component then
-        animations = db:get_animations(selected_component.id)
-        selected_animation = animations[1]
-        load_body_types()
-    end
-end
+    local addedTypes = {body = true} -- Track added types to avoid duplicates
 
-function load_body_types()
-    body_types = db:get_body_types()
-    selected_body_type = body_types[1]
-    load_assets()
-end
-
-function load_assets()
-    if selected_component and selected_variant and selected_animation and selected_body_type then
-        asset_files = db:get_asset_files(
-            selected_component.id,
-            selected_variant.id,
-            selected_animation.id,
-            selected_body_type.id
-        )
-        
-        -- Clear existing sprites
-        sprites = {}
-        
-        -- Load sprite images
-        for _, asset in ipairs(asset_files) do
-            local sprite_path = asset.file_path
-            -- Check if file exists in the filesystem
-            local file_info = love.filesystem.getInfo(sprite_path)
-            if file_info then
-                table.insert(sprites, {
-                    image = love.graphics.newImage(sprite_path),
-                    z_position = asset.z_position,
-                    layer_number = asset.layer_number
-                })
-            else
-                print("Warning: Could not find sprite file: " .. sprite_path)
+    local row = cursor:fetch({}, "a")
+    while row do
+        -- Only add if we don't have this type yet
+        if not addedTypes[row.type_name] then
+            -- 50% chance to add this part (for more variety)
+            if love.math.random() > 0.5 then
+                character[row.type_name] = {
+                    sheet_id = row.sheet_id,
+                    name = row.name,
+                    type = row.type_name,
+                    path = getLayerPath(row.sheet_id)
+                }
+                addedTypes[row.type_name] = true
             end
         end
-        
-        -- Sort sprites by z-position
-        table.sort(sprites, function(a, b)
-            return a.z_position < b.z_position
-        end)
-        
-        -- Reset animation
-        current_frame = 1
-        animation_timer = 0
+
+        row = cursor:fetch({}, "a")
+    end
+    cursor:close()
+
+    -- Ensure we have at least some basic parts
+    ensureBasicParts(sheets)
+
+    -- Query available animations for this character
+    availableAnimations = {"idle"} -- Default animation is always available
+
+    local cursor = conn:execute([[
+        SELECT DISTINCT a.animation_name
+        FROM animations a
+        JOIN sheets s ON a.sheet_id = s.sheet_id
+        WHERE s.type_name = 'body'
+    ]])
+
+    local row = cursor:fetch({}, "a")
+    while row do
+        if row.animation_name ~= "idle" then
+            table.insert(availableAnimations, row.animation_name)
+        end
+        row = cursor:fetch({}, "a")
+    end
+    cursor:close()
+
+    print("Available animations: " .. table.concat(availableAnimations, ", "))
+end
+
+-- Function to make sure we have basic parts for a complete character
+function ensureBasicParts(sheets)
+    local essentialTypes = {"body", "head", "hair"}
+
+    for _, essentialType in ipairs(essentialTypes) do
+        if not character[essentialType] then
+            local sheet = findSheetByType(sheets, essentialType)
+            if sheet then
+                character[essentialType] = {
+                    sheet_id = sheet.sheet_id,
+                    name = sheet.name,
+                    type = sheet.type_name,
+                    path = getLayerPath(sheet.sheet_id)
+                }
+            end
+        end
     end
 end
 
+-- Find a sheet by its type
+function findSheetByType(sheets, typeName)
+    local possibleSheets = {}
+
+    for _, sheet in ipairs(sheets) do
+        if sheet.type_name == typeName then
+            table.insert(possibleSheets, sheet)
+        end
+    end
+
+    if #possibleSheets > 0 then
+        -- Return a random sheet of this type
+        return possibleSheets[love.math.random(1, #possibleSheets)]
+    end
+
+    return nil
+end
+
+-- Get the file path for a sheet layer
+function getLayerPath(sheetId)
+    local cursor = conn:execute(string.format([[
+        SELECT lp.path_value
+        FROM layers l
+        JOIN layer_paths lp ON l.layer_id = lp.layer_id
+        WHERE l.sheet_id = %d
+        AND lp.path_type = 'default'
+        LIMIT 1
+    ]], sheetId))
+
+    local path = nil
+    if cursor then
+        local row = cursor:fetch({}, "a")
+        if row then
+            path = row.path_value
+        end
+        cursor:close()
+    end
+
+    -- If no specific path found, try to get from files table
+    if not path then
+        local cursor = conn:execute(string.format([[
+            SELECT file_path
+            FROM files
+            WHERE sheet_id = %d
+            LIMIT 1
+        ]], sheetId))
+
+        if cursor then
+            local row = cursor:fetch({}, "a")
+            if row then
+                path = row.file_path
+            end
+            cursor:close()
+        end
+    end
+
+    return path
+end
+
+-- Load character part images
+function loadCharacterImages()
+    characterLayers = {}
+
+    -- Sort parts by Z-order (this is a basic implementation, ideally use z_position from database)
+    local zOrder = {
+        body = 10,
+        legs = 20,
+        feet = 30,
+        torso = 40,
+        arms = 50,
+        hands = 60,
+        head = 70,
+        eyes = 80,
+        nose = 90,
+        ears = 100,
+        hair = 110,
+        facial_hair = 120,
+        accessories = 130
+    }
+
+    local orderedParts = {}
+    for type, part in pairs(character) do
+        table.insert(orderedParts, {type = type, part = part, z = zOrder[type] or 500})
+    end
+
+    table.sort(orderedParts, function(a, b) return a.z < b.z end)
+
+    -- Load each part
+    for _, item in ipairs(orderedParts) do
+        local part = item.part
+
+        if part.path then
+            -- In a real application, you would need to properly construct file paths
+            -- This is a simplified example
+            local imagePath = SPRITE_BASE_PATH .. part.path
+
+            -- For this demo, we'll create placeholder colored rectangles
+            -- In a real app, you'd load the actual image: love.graphics.newImage(imagePath)
+            local color = getColorForType(item.type)
+
+            table.insert(characterLayers, {
+                type = item.type,
+                color = color,
+                z = item.z
+            })
+
+            print("Added layer: " .. item.type)
+        end
+    end
+end
+
+-- Get a color for a specific character part type
+function getColorForType(partType)
+    local colors = {
+        body = {0.8, 0.6, 0.5},
+        head = {0.8, 0.6, 0.5},
+        torso = {0.2, 0.4, 0.8},
+        legs = {0.3, 0.3, 0.7},
+        feet = {0.4, 0.3, 0.2},
+        hair = {0.3, 0.2, 0.1},
+        eyes = {0.1, 0.6, 0.9},
+        facial_hair = {0.3, 0.2, 0.1},
+        accessories = {0.8, 0.8, 0.2},
+        arms = {0.2, 0.4, 0.8},
+        hands = {0.8, 0.6, 0.5},
+        ears = {0.8, 0.6, 0.5},
+        nose = {0.8, 0.6, 0.5}
+    }
+
+    return colors[partType] or {0.5, 0.5, 0.5}
+end
+
+-- Update function
 function love.update(dt)
+    -- Update animation timer
+    animationTimer = animationTimer + dt
+
+    -- Get frame info for current animation
+    local anim = animationFrames[currentAnimation] or {1, 1}
+    local startFrame, endFrame = anim[1], anim[2]
+
+    -- Calculate frame count
+    local frameCount = endFrame - startFrame + 1
+
     -- Update animation frame
-    if selected_animation and selected_animation.frame_count > 1 then
-        animation_timer = animation_timer + dt
-        if animation_timer >= animation_speed then
-            animation_timer = animation_timer - animation_speed
-            current_frame = current_frame + 1
-            if current_frame > selected_animation.frame_count then
-                current_frame = 1
+    if frameCount > 1 and animationTimer >= ANIMATION_SPEED then
+        currentFrame = currentFrame + 1
+        if currentFrame > frameCount then
+            currentFrame = 1
+        end
+        animationTimer = 0
+    end
+
+    -- Handle keyboard input for changing animations
+    if love.keyboard.isDown("space") and not spaceWasDown then
+        -- Cycle through available animations
+        local currentIndex = 1
+        for i, anim in ipairs(availableAnimations) do
+            if anim == currentAnimation then
+                currentIndex = i
+                break
             end
         end
+
+        currentIndex = currentIndex % #availableAnimations + 1
+        currentAnimation = availableAnimations[currentIndex]
+        currentFrame = 1
+        spaceWasDown = true
+    elseif not love.keyboard.isDown("space") then
+        spaceWasDown = false
     end
+
+    -- Reset keysPressed table
+    love.keyboard.keysPressed = {}
 end
 
+-- Draw function
 function love.draw()
     -- Draw background
-    love.graphics.setColor(0.2, 0.2, 0.2)
-    love.graphics.rectangle("fill", 0, 0, love.graphics.getWidth(), love.graphics.getHeight())
-    
-    -- Draw sidebar
-    love.graphics.setColor(0.3, 0.3, 0.3)
-    love.graphics.rectangle("fill", 0, 0, ui.sidebar_width, love.graphics.getHeight())
-    
-    -- Draw UI elements
-    draw_sidebar()
-    
-    -- Draw character preview
-    draw_character_preview()
+    love.graphics.setColor(0.2, 0.2, 0.3)
+    love.graphics.rectangle("fill", 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT)
+
+    -- Center the character
+    local x = WINDOW_WIDTH / 2
+    local y = WINDOW_HEIGHT / 2
+
+    -- Draw character parts
+    for _, layer in ipairs(characterLayers) do
+        drawCharacterPart(layer, x, y)
+    end
+
+    -- Draw UI
+    drawUI()
 end
 
-function draw_sidebar()
-    local x = 10
-    local y = 10 - ui.scroll_y
-    
-    -- Draw categories
-    love.graphics.setColor(1, 1, 1)
-    love.graphics.print("Categories:", x, y)
-    y = y + 25
-    
-    for _, category in ipairs(categories) do
-        if category == selected_category then
-            love.graphics.setColor(0.4, 0.7, 1)
+-- Draw a character part
+function drawCharacterPart(layer, x, y)
+    -- In a real application, you'd draw the sprite from the spritesheet
+    -- Here we're just drawing colored rectangles as placeholders
+
+    -- Calculate position based on animation frame and direction
+    local row = directionRows[currentDirection] or 1
+
+    -- Set color for this part
+    love.graphics.setColor(layer.color)
+
+    -- Draw part as a rectangle for this demo
+    -- Adjust shape slightly based on part type
+    local baseWidth = SPRITE_WIDTH * CHARACTER_SCALE * 0.6
+    local baseHeight = SPRITE_HEIGHT * CHARACTER_SCALE * 0.6
+
+    if layer.type == "body" then
+        love.graphics.rectangle("fill", x - baseWidth/2, y - baseHeight/2, baseWidth, baseHeight)
+    elseif layer.type == "head" then
+        local headSize = baseWidth * 0.5
+        love.graphics.circle("fill", x, y - baseHeight/2, headSize/2)
+    elseif layer.type == "hair" then
+        local headSize = baseWidth * 0.5
+        love.graphics.setColor(layer.color[1], layer.color[2], layer.color[3], 0.8)
+        love.graphics.circle("fill", x, y - baseHeight/2, headSize/2 * 1.1)
+    elseif layer.type == "torso" then
+        love.graphics.rectangle("fill", x - baseWidth/2 * 0.8, y - baseHeight/2 * 0.7, baseWidth * 0.8, baseHeight * 0.7)
+    elseif layer.type == "legs" then
+        love.graphics.rectangle("fill", x - baseWidth/2 * 0.7, y, baseWidth * 0.3, baseHeight * 0.7)
+        love.graphics.rectangle("fill", x + baseWidth/2 * 0.4, y, baseWidth * 0.3, baseHeight * 0.7)
+    elseif layer.type == "feet" then
+        love.graphics.rectangle("fill", x - baseWidth/2 * 0.8, y + baseHeight/2 * 0.6, baseWidth * 0.4, baseHeight * 0.2)
+        love.graphics.rectangle("fill", x + baseWidth/2 * 0.4, y + baseHeight/2 * 0.6, baseWidth * 0.4, baseHeight * 0.2)
+    elseif layer.type == "arms" then
+        if currentAnimation == "slash" then
+            -- Raised arm for slashing
+            love.graphics.rectangle("fill", x + baseWidth/2 * 0.5, y - baseHeight/2 * 0.5, baseWidth * 0.2, baseHeight * 0.6)
+            love.graphics.rectangle("fill", x - baseWidth/2 * 0.7, y - baseHeight/2 * 0.5, baseWidth * 0.2, baseHeight * 0.6)
         else
-            love.graphics.setColor(0.8, 0.8, 0.8)
+            -- Normal arms
+            love.graphics.rectangle("fill", x + baseWidth/2 * 0.7, y - baseHeight/2 * 0.3, baseWidth * 0.2, baseHeight * 0.6)
+            love.graphics.rectangle("fill", x - baseWidth/2 * 0.9, y - baseHeight/2 * 0.3, baseWidth * 0.2, baseHeight * 0.6)
         end
-        love.graphics.print(category.display_name, x + 10, y)
-        y = y + ui.item_height
+    else
+        -- Generic part
+        love.graphics.rectangle("fill", x - baseWidth/4, y - baseHeight/4, baseWidth/2, baseHeight/2)
     end
-    
-    y = y + 10
-    
-    -- Draw component types
-    if #component_types > 0 then
-        love.graphics.setColor(1, 1, 1)
-        love.graphics.print("Component Types:", x, y)
-        y = y + 25
-        
-        for _, comp_type in ipairs(component_types) do
-            if comp_type == selected_component_type then
-                love.graphics.setColor(0.4, 0.7, 1)
-            else
-                love.graphics.setColor(0.8, 0.8, 0.8)
-            end
-            love.graphics.print(comp_type.display_name, x + 10, y)
-            y = y + ui.item_height
-        end
-        
-        y = y + 10
-    end
-    
-    -- Draw components
-    if #components > 0 then
-        love.graphics.setColor(1, 1, 1)
-        love.graphics.print("Components:", x, y)
-        y = y + 25
-        
-        for _, component in ipairs(components) do
-            if component == selected_component then
-                love.graphics.setColor(0.4, 0.7, 1)
-            else
-                love.graphics.setColor(0.8, 0.8, 0.8)
-            end
-            love.graphics.print(component.display_name, x + 10, y)
-            y = y + ui.item_height
-        end
-        
-        y = y + 10
-    end
-    
-    -- Draw variants
-    if #variants > 0 then
-        love.graphics.setColor(1, 1, 1)
-        love.graphics.print("Variants:", x, y)
-        y = y + 25
-        
-        for _, variant in ipairs(variants) do
-            if variant == selected_variant then
-                love.graphics.setColor(0.4, 0.7, 1)
-            else
-                love.graphics.setColor(0.8, 0.8, 0.8)
-            end
-            love.graphics.print(variant.display_name, x + 10, y)
-            y = y + ui.item_height
-        end
-        
-        y = y + 10
-    end
-    
-    -- Draw animations
-    if #animations > 0 then
-        love.graphics.setColor(1, 1, 1)
-        love.graphics.print("Animations:", x, y)
-        y = y + 25
-        
-        for _, animation in ipairs(animations) do
-            if animation == selected_animation then
-                love.graphics.setColor(0.4, 0.7, 1)
-            else
-                love.graphics.setColor(0.8, 0.8, 0.8)
-            end
-            love.graphics.print(animation.display_name, x + 10, y)
-            y = y + ui.item_height
-        end
-        
-        y = y + 10
-    end
-    
-    -- Draw body types
-    if #body_types > 0 then
-        love.graphics.setColor(1, 1, 1)
-        love.graphics.print("Body Types:", x, y)
-        y = y + 25
-        
-        for _, body_type in ipairs(body_types) do
-            if body_type == selected_body_type then
-                love.graphics.setColor(0.4, 0.7, 1)
-            else
-                love.graphics.setColor(0.8, 0.8, 0.8)
-            end
-            love.graphics.print(body_type.display_name, x + 10, y)
-            y = y + ui.item_height
-        end
-    end
-    
-    -- Update max scroll
-    ui.max_scroll = math.max(0, y + ui.scroll_y - love.graphics.getHeight() + 20)
 end
 
-function draw_character_preview()
-    -- Draw character in the center of the screen (right side of sidebar)
-    local center_x = ui.sidebar_width + (love.graphics.getWidth() - ui.sidebar_width) / 2
-    local center_y = love.graphics.getHeight() / 2
-    
-    if #sprites == 0 then
-        -- No sprites to display
-        love.graphics.setColor(1, 1, 1)
-        love.graphics.print("No sprites available for this selection", center_x - 100, center_y)
-        return
-    end
-    
-    -- Draw each sprite layer
+-- Draw UI elements
+function drawUI()
     love.graphics.setColor(1, 1, 1)
-    for _, sprite in ipairs(sprites) do
-        local image = sprite.image
-        if image then
-            -- Calculate sprite position based on frame
-            local frame_width = image:getWidth() / selected_animation.frame_count
-            local quad = love.graphics.newQuad(
-                (current_frame - 1) * frame_width, 0,
-                frame_width, image:getHeight(),
-                image:getWidth(), image:getHeight()
-            )
-            
-            -- Draw the sprite
-            love.graphics.draw(
-                image,
-                quad,
-                center_x - frame_width/2,
-                center_y - image:getHeight()/2
-            )
-        end
-    end
-    
-    -- Draw frame info
-    love.graphics.setColor(1, 1, 1)
-    love.graphics.print(
-        "Frame: " .. current_frame .. "/" .. (selected_animation and selected_animation.frame_count or 1),
-        center_x - 50,
-        center_y + 150
-    )
-end
 
-function love.mousepressed(x, y, button)
-    if button == 1 and x < ui.sidebar_width then
-        local item_y = 10 - ui.scroll_y
-        
-        -- Categories
-        item_y = item_y + 25
-        for i, category in ipairs(categories) do
-            if y >= item_y and y < item_y + ui.item_height then
-                selected_category = category
-                load_component_types()
-                return
-            end
-            item_y = item_y + ui.item_height
-        end
-        
-        item_y = item_y + 10
-        
-        -- Component types
-        if #component_types > 0 then
-            item_y = item_y + 25
-            for i, comp_type in ipairs(component_types) do
-                if y >= item_y and y < item_y + ui.item_height then
-                    selected_component_type = comp_type
-                    load_components()
-                    return
-                end
-                item_y = item_y + ui.item_height
-            end
-            
-            item_y = item_y + 10
-        end
-        
-        -- Components
-        if #components > 0 then
-            item_y = item_y + 25
-            for i, component in ipairs(components) do
-                if y >= item_y and y < item_y + ui.item_height then
-                    selected_component = component
-                    load_variants()
-                    return
-                end
-                item_y = item_y + ui.item_height
-            end
-            
-            item_y = item_y + 10
-        end
-        
-        -- Variants
-        if #variants > 0 then
-            item_y = item_y + 25
-            for i, variant in ipairs(variants) do
-                if y >= item_y and y < item_y + ui.item_height then
-                    selected_variant = variant
-                    load_assets()
-                    return
-                end
-                item_y = item_y + ui.item_height
-            end
-            
-            item_y = item_y + 10
-        end
-        
-        -- Animations
-        if #animations > 0 then
-            item_y = item_y + 25
-            for i, animation in ipairs(animations) do
-                if y >= item_y and y < item_y + ui.item_height then
-                    selected_animation = animation
-                    load_assets()
-                    return
-                end
-                item_y = item_y + ui.item_height
-            end
-            
-            item_y = item_y + 10
-        end
-        
-        -- Body types
-        if #body_types > 0 then
-            item_y = item_y + 25
-            for i, body_type in ipairs(body_types) do
-                if y >= item_y and y < item_y + ui.item_height then
-                    selected_body_type = body_type
-                    load_assets()
-                    return
-                end
-                item_y = item_y + ui.item_height
-            end
-        end
+    -- Draw control instructions
+    love.graphics.print("Controls:", 20, 20)
+    love.graphics.print("R: Generate new random character", 20, 40)
+    love.graphics.print("Space: Change animation", 20, 60)
+    love.graphics.print("Arrow keys: Change direction", 20, 80)
+
+    -- Draw current character info
+    love.graphics.print("Animation: " .. currentAnimation, 20, 120)
+    love.graphics.print("Direction: " .. currentDirection, 20, 140)
+    love.graphics.print("Frame: " .. currentFrame .. "/" .. frameCount, 20, 160)
+
+    -- Draw character composition
+    love.graphics.print("Character Parts:", WINDOW_WIDTH - 200, 20)
+
+    local y = 40
+    for type, part in pairs(character) do
+        love.graphics.print(type .. ": " .. part.name, WINDOW_WIDTH - 200, y)
+        y = y + 20
     end
 end
 
-function love.wheelmoved(x, y)
-    if x < ui.sidebar_width then
-        ui.scroll_y = math.max(0, math.min(ui.max_scroll, ui.scroll_y - y * 30))
+-- Handle keyboard input
+function love.keypressed(key)
+    if key == "escape" then
+        love.event.quit()
+    elseif key == "r" then
+        -- Generate new random character
+        generateRandomCharacter()
+        loadCharacterImages()
+    elseif key == "space" then
+        -- Change animation
+        local currentIndex = indexOf(availableAnimations, currentAnimation)
+        currentIndex = currentIndex + 1
+        if currentIndex > #availableAnimations then
+            currentIndex = 1
+        end
+        currentAnimation = availableAnimations[currentIndex]
+        currentFrame = 1
+        animationTimer = 0
+    elseif key == "up" then
+        currentDirection = "north"
+    elseif key == "down" then
+        currentDirection = "south"
+    elseif key == "left" then
+        currentDirection = "west"
+    elseif key == "right" then
+        currentDirection = "east"
     end
 end
 
+-- Helper function to find index of value in table
+function indexOf(table, value)
+    for i, v in ipairs(table) do
+        if v == value then
+            return i
+        end
+    end
+    return 1
+end
+
+-- Clean up when quitting
 function love.quit()
-    if db then
-        db:close()
+    if conn then
+        conn:close()
     end
-end 
+
+    if env then
+        env:close()
+    end
+end
