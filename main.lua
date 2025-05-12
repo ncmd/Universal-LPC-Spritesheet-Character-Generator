@@ -3,8 +3,8 @@
 
 -- Constants
 local WINDOW_WIDTH = 800
-local WINDOW_HEIGHT = 600
-local CHARACTER_SCALE = 3
+local WINDOW_HEIGHT = 930
+local CHARACTER_SCALE = 4
 local SPRITE_WIDTH = 64  -- Standard LPC sprite width
 local SPRITE_HEIGHT = 64 -- Standard LPC sprite height
 local ANIMATION_SPEED = 0.2
@@ -21,7 +21,8 @@ local currentFrame = 1
 local animationTimer = 0
 local currentAnimation = "walk"
 local currentDirection = "south" -- south, west, east, north
-local availableAnimations = {"idle", "walk", "run", "jump", "slash", "cast", "thrust",  "hurt", "backslash", "climb", "combat_idle", "emote", "sit", "halfslash"}
+-- local availableAnimations = {"idle", "walk", "run", "jump", "slash", "cast", "thrust",  "hurt", "backslash", "climb", "combat_idle", "emote", "sit", "halfslash"}
+local availableAnimations = {"idle"}
 local directions = {"south", "west", "east", "north"}
 local spaceWasDown = false
 
@@ -47,10 +48,10 @@ local animationFrames = {
 
 -- Direction frame row mappings
 local directionRows = {
-    south = 1,
+    south = 3,
     west = 2,
     east = 4,
-    north = 3
+    north = 1
 }
 
 -- Function to initialize Love2D
@@ -187,11 +188,6 @@ function love.load()
     loadCharacterImages()
 
     print("Character generated successfully!")
-    for k,v in pairs(character) do
-        if k == "head" then
-            print(k,v)
-        end
-    end
 end
 
 -- Function to generate a random character from database
@@ -215,7 +211,6 @@ function generateRandomCharacter()
 
     -- Base body
     local bodySheet = findSheetByType(sheets, "body")
-    print("BODY SHEET:",bodySheet.sheet_id)
     if bodySheet then
         local variant = findVariantByType(bodySheet.sheet_id, "body")
         if variant ~= nil then
@@ -251,45 +246,35 @@ function generateRandomCharacter()
     local cursor = conn:execute([[
         SELECT s.sheet_id, s.name, s.type_name
         FROM sheets s
-        WHERE s.type_name != 'body'
-        AND s.type_name != 'head'
         ORDER BY RANDOM()
     ]])
 
-    local addedTypes = {head = true, body = true, face = true}
+    local addedTypes = {
+        head = true,
+    }
 
     local row = cursor:fetch({}, "a")
     while row do
         -- Only add if we don't have this type yet
-        if not addedTypes[row.type_name] then
-
-            if love.math.random() > 0.5 then
-                local variant = findVariantByType(row.sheet_id, row.type_name)
-                if variant ~= nil then
-                    if row then
-                        character["head"] = {
-                            sheet_id = row.sheet_id,
-                            name = row.name,
-                            type = row.type_name,
-                            path = getLayerPath(row.sheet_id, row.type_name)..currentAnimation.."/"..variant.variant_name..".png"
-                        }
-                    end
-                end
-                addedTypes[row.type_name] = true
-            end
-
-            -- -- 50% chance to add this part (for more variety)
-            -- -- if love.math.random() > 0.5 then
-            --     character[row.type_name] = {
-            --         sheet_id = row.sheet_id,
-            --         name = row.name,
-            --         type = row.type_name,
-            --         -- path = getLayerPath(row.sheet_id)
-            --         path = getLayerPath(row.sheet_id, row.type_name).."/".."walk".."/"..variant..".png"
-            --     }
-                -- addedTypes[row.type_name] = true
-            -- end
-        end
+        -- add other parts
+        -- if not addedTypes[row.type_name] then
+        --
+        --     if love.math.random() > 0.5 then
+        --         local variant = findVariantByType(row.sheet_id, row.type_name)
+        --         if variant ~= nil then
+        --             if row then
+        --                 character[row.type_name] = {
+        --                     sheet_id = row.sheet_id,
+        --                     name = row.name,
+        --                     type = row.type_name,
+        --                     path = getLayerPath(row.sheet_id, row.type_name)..currentAnimation.."/"..variant.variant_name..".png"
+        --                 }
+        --             end
+        --         end
+        --         addedTypes[row.type_name] = true
+        --     end
+        --
+        -- end
 
         row = cursor:fetch({}, "a")
     end
@@ -320,29 +305,10 @@ function generateRandomCharacter()
 end
 
 -- Function to make sure we have basic parts for a complete character
--- the problem is choosing a random head does not choose the base 
--- 
--- ▾ head/
---     ▸ ears/
---     ▸ faces/
---     ▸ fins/
---     ▾ heads/
---       ▸ alien/adult/
---       ▸ boarman/
---       ▸ frankenstein/
---       ▾ goblin/
---         ▾ adult/
---           ▸ backslash/
---           ▸ climb/
---           ▸ combat_idle/
---           ▸ emote/
---           ▸ halfslash/
---           ▸ hurt/
---           ▾ idle/
---               amber.png
 function ensureBasicParts(sheets)
     -- local essentialTypes = {"eyes","body", "head", "hair", "arms","legs", "feet"}
-    local essentialTypes = {"eyes", "body", "head", "hair", "arms", "legs", "feet"}
+    -- add required parts
+    local essentialTypes = { "body", "head",  "feet"}
 
     for _, essentialType in ipairs(essentialTypes) do
         if not character[essentialType] then
@@ -368,91 +334,40 @@ end
 
 function findRequiredSheet(sheets,type)
     local cursor
-    print("FINDING REQAUIRED SHEET")
 
-    if type == "body" then
-        -- cursor = conn:execute(string.format([[
-        --     SELECT l.sheet_id, lp.path_value
-        --     FROM layers l
-        --     JOIN layer_paths lp ON l.layer_id = lp.layer_id
-        --     WHERE lp.path_value like '%%body/bodies/%%'
-        --     ORDER BY RANDOM()
-        --     LIMIT 1
-        -- ]]))
-        cursor = conn:execute(string.format([[
-            SELECT l.sheet_id, lp.path_value, s.type_name
-            FROM layers l
-            JOIN layer_paths lp ON l.layer_id = lp.layer_id
-            JOIN sheets s ON l.sheet_id = s.sheet_id
-            WHERE lp.path_value like '%%body/bodies/%%'
-            AND s.type_name = '%s'
-            ORDER BY RANDOM()
-            LIMIT 1
-        ]], type))
-        print("BODY")
-    elseif type == "head" then
-        -- cursor = conn:execute(string.format([[
-        --     SELECT l.sheet_id, lp.path_value
-        --     FROM layers l
-        --     JOIN layer_paths lp ON l.layer_id = lp.layer_id
-        --     WHERE lp.path_value like '%%head/heads/%%'
-        --     ORDER BY RANDOM()
-        --     LIMIT 1
-        -- ]]))
-        cursor = conn:execute(string.format([[
-            SELECT l.sheet_id, lp.path_value, s.type_name
-            FROM layers l
-            JOIN layer_paths lp ON l.layer_id = lp.layer_id
-            JOIN sheets s ON l.sheet_id = s.sheet_id
-            WHERE lp.path_value like '%%head/heads/%%'
-            AND s.type_name = '%s'
-            ORDER BY RANDOM()
-            LIMIT 1
-        ]], type))
-        print("HEAD")
-    else
-        cursor = conn:execute(string.format([[
-            SELECT l.sheet_id, lp.path_value, s.type_name
-            FROM layers l
-            JOIN layer_paths lp ON l.layer_id = lp.layer_id
-            JOIN sheets s ON l.sheet_id = s.sheet_id
-            WHERE s.type_name = '%s'
-            ORDER BY RANDOM()
-            LIMIT 1
-        ]], type))
-        print("ELSEE")
-    end
+    cursor = conn:execute(string.format([[
+        SELECT l.sheet_id, lp.path_value, s.type_name
+        FROM layers l
+        JOIN layer_paths lp ON l.layer_id = lp.layer_id
+        JOIN sheets s ON l.sheet_id = s.sheet_id
+        WHERE s.type_name = '%s'
+        ORDER BY RANDOM()
+        LIMIT 1
+    ]], type))
 
     if cursor then
-        print("CURROR RESULT = true")
         local row = cursor:fetch({}, "a")
         if row then
-            print("CURROR RESULT 2")
             local sheet_id = row.sheet_id
 
             for _, sheet in ipairs(sheets) do
                 if sheet.sheet_id == sheet_id then
-                    print("FOUND SHEET: "..sheet_id)
                     return sheet
                 end
             end
         end
         cursor:close()
     end
-    print("COULD NOT FIND SHEET")
     return nil
 end
 
 -- Find a sheet by its type
 function findSheetByType(sheets, typeName)
     local possibleSheets = {}
-    print("FIND SHEET BY TYPE")
-
     for _, sheet in ipairs(sheets) do
         if sheet.type_name == typeName then
             local s = findRequiredSheet(sheets, typeName)
             if s ~= nil then
-                print("FOUND SHEET:",s.sheet_id)
                 table.insert(possibleSheets, s)
             end
         end
@@ -468,12 +383,6 @@ end
 
 function findRequiredVariant(sheet_id,type)
     local cursor
-    print("FINDING VARIANT",sheet_id, type)
-
-    -- select v.variant_id, v.variant_name from variants v join sheets s on s.sheet_id = v.sheet_id where s.sheet_id = 659 and s.type_name = 'shoes';
-    -- select v.variant_id, v.variant_name from variants v joion sheets s on
-    -- s.sheet_id = v.sheet_id where s.sheet_id = 450 and s.type_name = 'body'
-    -- order by random()
 
     cursor = conn:execute(string.format([[
         SELECT v.variant_id, v.variant_name
@@ -486,23 +395,19 @@ function findRequiredVariant(sheet_id,type)
     ]], sheet_id, type))
 
     if cursor then
-        print("CURROR RESULT = true")
         local row = cursor:fetch({}, "a")
         if row then
             return row
         end
         cursor:close()
     end
-    print("COULD NOT FIND VARIANT")
     return nil
 end
 
 
 function findVariantByType(sheet_id, typeName)
-    -- select v.variant_name from sheets s join variants v on v.sheet_id =
 
     local possibleVariants = {}
-    print("FIND VARIANTS BY TYPE")
     local v = findRequiredVariant(sheet_id, typeName)
     if v ~= nil then
         print("FOUND VARIANT:",v.variant_name,v.sheet_id)
@@ -520,45 +425,20 @@ end
 function getLayerPath(sheetId, type)
     local cursor
 
-    if type == "body" then
-        cursor = conn:execute(string.format([[
-            SELECT lp.path_value
-            FROM layers l
-            JOIN layer_paths lp ON l.layer_id = lp.layer_id
-            WHERE l.sheet_id = %d
-            ORDER BY RANDOM()
-            LIMIT 1
-        ]], sheetId))
-        print("GETLAYERPATH BODY")
-    elseif type == "head" then
-        cursor = conn:execute(string.format([[
-            SELECT lp.path_value
-            FROM layers l
-            JOIN layer_paths lp ON l.layer_id = lp.layer_id
-            WHERE l.sheet_id = %d
-            ORDER BY RANDOM()
-            LIMIT 1
-        ]], sheetId))
-        print("GETLAYERPATH HEAD")
-    else
-        cursor = conn:execute(string.format([[
-            SELECT lp.path_value
-            FROM layers l
-            JOIN layer_paths lp ON l.layer_id = lp.layer_id
-            WHERE l.sheet_id = %d
-            ORDER BY RANDOM()
-            LIMIT 1
-        ]], sheetId))
-        print("GETLAYERPATH ELSE")
-    end
+    cursor = conn:execute(string.format([[
+        SELECT lp.path_value
+        FROM layers l
+        JOIN layer_paths lp ON l.layer_id = lp.layer_id
+        WHERE l.sheet_id = %d
+        ORDER BY RANDOM()
+        LIMIT 1
+    ]], sheetId))
 
     local path = nil
     if cursor then
-        print("GETLAYERPATH")
         local row = cursor:fetch({}, "a")
         if row then
             path = row.path_value
-            print("GETLAYERPATH PATH:"..path)
         end
         cursor:close()
     end
@@ -587,7 +467,6 @@ end
 
 -- Function to safely load an image file
 function safeLoadImage(path)
-    print("LOADING IMAGE:"..path)
 
     -- local success, result = pcall(love.graphics.newImage, path..currentAnimation..".png")
     local success, result = pcall(love.graphics.newImage, path)
@@ -611,7 +490,7 @@ function loadCharacterImages()
         feet = 30,
         torso = 40,
         arms = 50,
-        hands = 500,
+        hands = 60,
         head = 70,
         eyes = 80,
         nose = 90,
@@ -771,15 +650,15 @@ function drawCharacterPart(layer, x, y)
     local offsetX, offsetY = 0, 0
 
     -- Part-specific offsets to improve alignment
-    if layer.type == "head" then
-        offsetY = -5 * CHARACTER_SCALE  -- Move head up slightly
-    elseif layer.type == "hair" then
-        offsetY = -5 * CHARACTER_SCALE  -- Align hair with head
-    elseif layer.type == "facial_hair" then
-        offsetY = -3 * CHARACTER_SCALE  -- Align facial hair with head
-    elseif layer.type == "eyes" or layer.type == "nose" or layer.type == "ears" then
-        offsetY = -5 * CHARACTER_SCALE  -- Align face features with head
-    end
+    -- if layer.type == "head" then
+    --     offsetY = -5 * CHARACTER_SCALE  -- Move head up slightly
+    -- elseif layer.type == "hair" then
+    --     offsetY = -5 * CHARACTER_SCALE  -- Align hair with head
+    -- elseif layer.type == "facial_hair" then
+    --     offsetY = -3 * CHARACTER_SCALE  -- Align facial hair with head
+    -- elseif layer.type == "eyes" or layer.type == "nose" or layer.type == "ears" then
+    --     offsetY = -5 * CHARACTER_SCALE  -- Align face features with head
+    -- end
 
     -- Animation-specific adjustments
     if currentAnimation == "walk" or currentAnimation == "run" then
@@ -793,46 +672,7 @@ function drawCharacterPart(layer, x, y)
     end
 
     -- Draw either sprite or placeholder
-    if 1 == 2 then -- layer.placeholder then
-        -- Draw placeholder if no sprite available
-        love.graphics.setColor(layer.color)
-
-        -- Draw part as a rectangle for placeholder
-        local baseWidth = SPRITE_WIDTH * CHARACTER_SCALE * 0.6
-        local baseHeight = SPRITE_HEIGHT * CHARACTER_SCALE * 0.6
-
-        if layer.type == "body" then
-            love.graphics.rectangle("fill", x - baseWidth/2, y - baseHeight/2, baseWidth, baseHeight)
-        elseif layer.type == "head" then
-            local headSize = baseWidth * 0.5
-            love.graphics.circle("fill", x, y - baseHeight/2 + offsetY, headSize/2)
-        elseif layer.type == "hair" then
-            local headSize = baseWidth * 0.5
-            love.graphics.setColor(layer.color[1], layer.color[2], layer.color[3], 0.8)
-            love.graphics.circle("fill", x, y - baseHeight/2 + offsetY, headSize/2 * 1.1)
-        elseif layer.type == "torso" then
-            love.graphics.rectangle("fill", x - baseWidth/2 * 0.8, y - baseHeight/2 * 0.7, baseWidth * 0.8, baseHeight * 0.7)
-        elseif layer.type == "legs" then
-            love.graphics.rectangle("fill", x - baseWidth/2 * 0.7, y, baseWidth * 0.3, baseHeight * 0.7)
-            love.graphics.rectangle("fill", x + baseWidth/2 * 0.4, y, baseWidth * 0.3, baseHeight * 0.7)
-        elseif layer.type == "feet" then
-            love.graphics.rectangle("fill", x - baseWidth/2 * 0.8, y + baseHeight/2 * 0.6, baseWidth * 0.4, baseHeight * 0.2)
-            love.graphics.rectangle("fill", x + baseWidth/2 * 0.4, y + baseHeight/2 * 0.6, baseWidth * 0.4, baseHeight * 0.2)
-        elseif layer.type == "arms" then
-            if currentAnimation == "slash" then
-                -- Raised arm for slashing
-                love.graphics.rectangle("fill", x + baseWidth/2 * 0.5, y - baseHeight/2 * 0.5, baseWidth * 0.2, baseHeight * 0.6)
-                love.graphics.rectangle("fill", x - baseWidth/2 * 0.7, y - baseHeight/2 * 0.5, baseWidth * 0.2, baseHeight * 0.6)
-            else
-                -- Normal arms
-                love.graphics.rectangle("fill", x + baseWidth/2 * 0.7, y - baseHeight/2 * 0.3, baseWidth * 0.2, baseHeight * 0.6)
-                love.graphics.rectangle("fill", x - baseWidth/2 * 0.9, y - baseHeight/2 * 0.3, baseWidth * 0.2, baseHeight * 0.6)
-            end
-        else
-            -- Generic part
-            love.graphics.rectangle("fill", x - baseWidth/4, y - baseHeight/4, baseWidth/2, baseHeight/2)
-        end
-    else
+    if 1 == 1 then
         -- Draw actual sprite from spritesheet
         love.graphics.setColor(1, 1, 1)  -- Reset color to white for proper sprite rendering
 
@@ -937,11 +777,4 @@ function indexOf(table, value)
         end
     end
     return 1
-end
-
--- Clean up when quitting
-function love.quit()
-    if conn then
-        conn:close()
-    end
 end
